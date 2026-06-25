@@ -1,0 +1,6 @@
+name = "worldcup-2026-api"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# No bindings, secrets, or KV needed — the feed is public ESPN data and caching
+# uses the built-in Cache API. Deploy with: wrangler deploy (from this folder).

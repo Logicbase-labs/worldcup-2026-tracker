@@ -1,107 +1,48 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Trophy, Calendar, CalendarDays, MapPin, ChevronDown, Clock, RotateCcw,
-  Eye, EyeOff, Sparkles, Crown, Target, Radio,
+  Eye, EyeOff, Sparkles, Crown, Target, Radio, RefreshCw, AlertTriangle, Check, X,
 } from 'lucide-react'
-import {
-  GROUPS, LETTERS, KNOCKOUTS, KO_BY_ID, TEAMS, teamById,
-  fmtDate, fmtTime, fmtDayKey,
-} from './data.js'
+import { loadTournament } from './api.js'
+import { REFRESH_MS } from './config.js'
+import { buildViews, ROUND_META, fmtDate, fmtTime, fmtDayKey } from './data.js'
 
 const PRED_KEY = 'wc2026_predictions'
-const totalKoMatches = KNOCKOUTS.reduce((n, r) => n + r.matches.length, 0)
 
-// ── Match live status from the ticking clock ────────────────────────────────
-function matchStatus(iso, now) {
-  const start = new Date(iso).getTime()
-  const end = start + 2 * 60 * 60 * 1000 // ~2h window
-  if (now < start) return 'upcoming'
-  if (now < end) return 'live'
-  return 'past'
-}
-
-// ── Prediction resolution across the bracket ────────────────────────────────
-function resolveSlot(slot, preds) {
-  if (!slot) return null
-  if (slot.type === 'team') return teamById(slot.teamId)
-  if (slot.type === 'winner') {
-    const pick = preds[slot.matchId]
-    return pick ? teamById(pick) : null
-  }
-  if (slot.type === 'loser') {
-    const pick = preds[slot.matchId]
-    if (!pick) return null
-    const { a, b } = resolveMatch(KO_BY_ID[slot.matchId], preds)
-    if (!a || !b) return null
-    return a.id === pick ? b : a
-  }
-  return null
-}
-function resolveMatch(match, preds) {
-  return { a: resolveSlot(match.slotA, preds), b: resolveSlot(match.slotB, preds) }
-}
-// Drop any pick whose team is no longer a participant (after an upstream change).
-function prune(preds) {
-  let cur = { ...preds }
-  for (let pass = 0; pass < 8; pass++) {
-    let changed = false
-    for (const round of KNOCKOUTS) {
-      for (const m of round.matches) {
-        const pick = cur[m.id]
-        if (!pick) continue
-        const { a, b } = resolveMatch(m, cur)
-        if ((!a || a.id !== pick) && (!b || b.id !== pick)) {
-          delete cur[m.id]
-          changed = true
-        }
-      }
-    }
-    if (!changed) break
-  }
-  return cur
-}
-
-// ── Small shared bits ───────────────────────────────────────────────────────
+// ── Shared bits ─────────────────────────────────────────────────────────────
 function Flag({ team, className = 'h-4 w-6' }) {
-  if (!team) return <span className={`${className} inline-block rounded-[2px] bg-slate-700`} />
+  if (team && team.logo) {
+    return (
+      <img src={team.logo} alt={team.name} loading="lazy"
+        className={`${className} inline-block shrink-0 rounded-[2px] object-contain`} />
+    )
+  }
   return (
-    <img
-      src={`https://flagcdn.com/${team.iso}.svg`}
-      alt={team.name}
-      loading="lazy"
-      className={`${className} inline-block shrink-0 rounded-[2px] object-cover ring-1 ring-black/30`}
-    />
+    <span className={`${className} inline-flex shrink-0 items-center justify-center rounded-[2px] bg-slate-700 text-[8px] font-bold text-slate-300`}>
+      {team && team.abbrev ? team.abbrev.slice(0, 3) : '—'}
+    </span>
   )
 }
 
-function VenueLine({ venue, iso }) {
-  return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
-      <span className="inline-flex items-center gap-1">
-        <Calendar className="h-3.5 w-3.5" /> {fmtDate(iso)}
-      </span>
-      <span className="inline-flex items-center gap-1">
-        <Clock className="h-3.5 w-3.5" /> {fmtTime(iso)}
-      </span>
-      <span className="inline-flex items-center gap-1">
-        <MapPin className="h-3.5 w-3.5" /> {venue.stadium}, {venue.city}
-      </span>
-    </div>
-  )
+function statusInfo(m) {
+  if (m.state === 'in') return { kind: 'live', label: m.status || 'Live' }
+  if (m.state === 'post') return { kind: 'final', label: m.status || 'Final' }
+  return { kind: 'pre', label: 'Upcoming' }
 }
 
-function StatusPill({ status }) {
-  if (status === 'live') {
+function StatusPill({ m }) {
+  const s = statusInfo(m)
+  if (s.kind === 'live') {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-rose-300 ring-1 ring-rose-500/40">
-        <span className="h-1.5 w-1.5 animate-live-pulse rounded-full bg-rose-400" /> Live
+        <span className="h-1.5 w-1.5 animate-live-pulse rounded-full bg-rose-400" /> {s.label}
       </span>
     )
   }
-  if (status === 'completed') {
+  if (s.kind === 'final') {
     return (
       <span className="rounded-full bg-slate-600/40 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-300 ring-1 ring-slate-500/40">
-        Final
+        {s.label}
       </span>
     )
   }
@@ -112,36 +53,61 @@ function StatusPill({ status }) {
   )
 }
 
+function VenueLine({ m }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
+      <span className="inline-flex items-center gap-1"><Calendar className="h-3.5 w-3.5" /> {fmtDate(m.date)}</span>
+      <span className="inline-flex items-center gap-1"><Clock className="h-3.5 w-3.5" /> {fmtTime(m.date)}</span>
+      {m.venue.stadium && (
+        <span className="inline-flex items-center gap-1">
+          <MapPin className="h-3.5 w-3.5" /> {m.venue.stadium}{m.venue.city ? `, ${m.venue.city}` : ''}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function ScoreOrVs({ m }) {
+  if (m.state === 'pre' || m.home.score == null || m.away.score == null) {
+    return <span className="px-2 text-[10px] font-bold uppercase tracking-widest text-slate-600">vs</span>
+  }
+  const hw = m.home.score > m.away.score
+  const aw = m.away.score > m.home.score
+  const live = m.state === 'in'
+  return (
+    <span className={`flex items-center gap-1.5 rounded-lg px-3 py-1 font-mono text-base font-bold tabular-nums ${live ? 'bg-rose-500/15 ring-1 ring-rose-500/30' : 'bg-slate-900/70'}`}>
+      <span className={hw ? 'text-emerald-400' : 'text-slate-200'}>{m.home.score}</span>
+      <span className="text-slate-500">:</span>
+      <span className={aw ? 'text-emerald-400' : 'text-slate-200'}>{m.away.score}</span>
+    </span>
+  )
+}
+
 // ── Group stage ─────────────────────────────────────────────────────────────
 function GroupMatchRow({ m }) {
-  const homeWin = m.homeGoals > m.awayGoals
-  const awayWin = m.awayGoals > m.homeGoals
+  const post = m.state === 'post'
+  const hw = post && m.home.score > m.away.score
+  const aw = post && m.away.score > m.home.score
   return (
     <div className="rounded-xl border border-slate-700/50 bg-slate-800/40 p-3">
       <div className="mb-2 flex items-center justify-between">
-        <VenueLine venue={m.venue} iso={m.kickoff} />
-        <StatusPill status="completed" />
+        <VenueLine m={m} />
+        <StatusPill m={m} />
       </div>
       <div className="flex items-center justify-between gap-2">
-        <div className={`flex flex-1 items-center gap-2 ${homeWin ? 'font-bold text-white' : 'text-slate-300'}`}>
-          <Flag team={m.home} />
-          <span className="truncate">{m.home.name}</span>
+        <div className={`flex flex-1 items-center gap-2 ${hw ? 'font-bold text-white' : 'text-slate-300'}`}>
+          <Flag team={m.home} /><span className="truncate">{m.home.name}</span>
         </div>
-        <div className="flex items-center gap-1.5 rounded-lg bg-slate-900/70 px-3 py-1 font-mono text-base font-bold tabular-nums">
-          <span className={homeWin ? 'text-emerald-400' : 'text-slate-200'}>{m.homeGoals}</span>
-          <span className="text-slate-500">:</span>
-          <span className={awayWin ? 'text-emerald-400' : 'text-slate-200'}>{m.awayGoals}</span>
-        </div>
-        <div className={`flex flex-1 items-center justify-end gap-2 ${awayWin ? 'font-bold text-white' : 'text-slate-300'}`}>
-          <span className="truncate text-right">{m.away.name}</span>
-          <Flag team={m.away} />
+        <ScoreOrVs m={m} />
+        <div className={`flex flex-1 items-center justify-end gap-2 ${aw ? 'font-bold text-white' : 'text-slate-300'}`}>
+          <span className="truncate text-right">{m.away.name}</span><Flag team={m.away} />
         </div>
       </div>
     </div>
   )
 }
 
-function StandingsTable({ standings, accent }) {
+function StandingsTable({ standings, anyPlayed }) {
   return (
     <div className="overflow-hidden rounded-xl border border-slate-700/50">
       <table className="w-full text-sm">
@@ -161,20 +127,12 @@ function StandingsTable({ standings, accent }) {
           {standings.map((r, i) => {
             const qualifies = i < 2
             const playoff = i === 2
+            const ptsColor = !anyPlayed ? '#cbd5e1' : qualifies ? '#34d399' : playoff ? '#fbbf24' : '#f87171'
             return (
-              <tr
-                key={r.team.id}
-                className={`border-t border-slate-700/40 ${
-                  qualifies ? 'bg-emerald-500/[0.07]' : playoff ? 'bg-amber-500/[0.06]' : ''
-                }`}
-              >
+              <tr key={r.team.id} className={`border-t border-slate-700/40 ${qualifies ? 'bg-emerald-500/[0.07]' : playoff ? 'bg-amber-500/[0.06]' : ''}`}>
                 <td className="px-2 py-2">
-                  <span
-                    className="inline-flex h-5 w-1.5 rounded-full align-middle"
-                    style={{
-                      background: qualifies ? '#34d399' : playoff ? '#fbbf24' : 'transparent',
-                    }}
-                  />
+                  <span className="inline-flex h-5 w-1.5 rounded-full align-middle"
+                    style={{ background: qualifies ? '#34d399' : playoff ? '#fbbf24' : 'transparent' }} />
                   <span className="ml-1.5 text-slate-400">{i + 1}</span>
                 </td>
                 <td className="py-2">
@@ -187,11 +145,9 @@ function StandingsTable({ standings, accent }) {
                 <td className="px-1.5 py-2 text-center text-slate-300">{r.w}</td>
                 <td className="px-1.5 py-2 text-center text-slate-300">{r.d}</td>
                 <td className="px-1.5 py-2 text-center text-slate-300">{r.l}</td>
-                <td className="px-1.5 py-2 text-center tabular-nums text-slate-300">
-                  {r.gd > 0 ? `+${r.gd}` : r.gd}
-                </td>
+                <td className="px-1.5 py-2 text-center tabular-nums text-slate-300">{r.gd > 0 ? `+${r.gd}` : r.gd}</td>
                 <td className="px-2 py-2 text-center">
-                  <span className="font-bold tabular-nums" style={{ color: accent[1] }}>{r.pts}</span>
+                  <span className="font-bold tabular-nums" style={{ color: ptsColor }}>{r.pts}</span>
                 </td>
               </tr>
             )
@@ -204,49 +160,35 @@ function StandingsTable({ standings, accent }) {
 
 function GroupCard({ group, open, onToggle, showMatches }) {
   const [a1, a2] = group.accent
+  const anyPlayed = group.matches.some((m) => m.state === 'post')
+  const leader = group.standings[0]
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-700/50 bg-slate-900/50 shadow-lg shadow-black/20 backdrop-blur">
-      <button
-        onClick={onToggle}
-        className="flex w-full items-center gap-3 p-4 text-left transition hover:bg-slate-800/40"
-        style={{ background: `linear-gradient(90deg, ${a1}1f, transparent 70%)` }}
-      >
-        <span
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-lg font-black text-white shadow-md"
-          style={{ background: `linear-gradient(135deg, ${a1}, ${a2})` }}
-        >
-          {group.letter}
-        </span>
+      <button onClick={onToggle} className="flex w-full items-center gap-3 p-4 text-left transition hover:bg-slate-800/40"
+        style={{ background: `linear-gradient(90deg, ${a1}1f, transparent 70%)` }}>
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-lg font-black text-white shadow-md"
+          style={{ background: `linear-gradient(135deg, ${a1}, ${a2})` }}>{group.letter}</span>
         <div className="min-w-0 flex-1">
           <div className="text-sm font-bold text-white">Group {group.letter}</div>
           <div className="mt-0.5 flex items-center gap-1.5">
-            {group.teams.map((t) => (
-              <Flag key={t.id} team={t} className="h-3 w-[18px]" />
-            ))}
+            {group.teams.map((t) => <Flag key={t.id} team={t} className="h-3 w-[18px]" />)}
           </div>
         </div>
-        <span
-          className="hidden rounded-full px-2 py-0.5 text-[10px] font-semibold text-emerald-300 ring-1 ring-emerald-500/30 sm:inline"
-        >
-          {group.standings[0].team.name} leads
-        </span>
-        <ChevronDown
-          className={`h-5 w-5 shrink-0 text-slate-400 transition-transform duration-300 ${open ? 'rotate-180' : ''}`}
-        />
+        {anyPlayed && (
+          <span className="hidden rounded-full px-2 py-0.5 text-[10px] font-semibold text-emerald-300 ring-1 ring-emerald-500/30 sm:inline">
+            {leader.team.name} {leader.pts}pts
+          </span>
+        )}
+        <ChevronDown className={`h-5 w-5 shrink-0 text-slate-400 transition-transform duration-300 ${open ? 'rotate-180' : ''}`} />
       </button>
-
       <div className={`collapsible ${open ? 'open' : ''}`}>
         <div className="collapsible-inner">
           <div className="space-y-4 px-4 pb-4 pt-1">
-            <StandingsTable standings={group.standings} accent={group.accent} />
+            <StandingsTable standings={group.standings} anyPlayed={anyPlayed} />
             {showMatches && (
               <div className="animate-fade-in space-y-2">
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                  Group matches
-                </div>
-                {group.matches.map((m) => (
-                  <GroupMatchRow key={m.id} m={m} />
-                ))}
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Group matches</div>
+                {group.matches.map((m) => <GroupMatchRow key={m.id} m={m} />)}
               </div>
             )}
           </div>
@@ -256,16 +198,14 @@ function GroupCard({ group, open, onToggle, showMatches }) {
   )
 }
 
-function GroupsView({ showCompleted, setShowCompleted }) {
-  const [openSet, setOpenSet] = useState(() => new Set(['A']))
-  const allOpen = openSet.size === LETTERS.length
-  const toggle = (L) =>
-    setOpenSet((s) => {
-      const n = new Set(s)
-      n.has(L) ? n.delete(L) : n.add(L)
-      return n
-    })
+function GroupsView({ groups, showCompleted, setShowCompleted }) {
+  const [openSet, setOpenSet] = useState(() => new Set())
+  const allOpen = openSet.size === groups.length && groups.length > 0
+  const toggle = (L) => setOpenSet((s) => { const n = new Set(s); n.has(L) ? n.delete(L) : n.add(L); return n })
 
+  if (!groups.length) {
+    return <Empty>Group fixtures haven't been published in the feed yet.</Empty>
+  }
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-700/50 bg-slate-900/40 p-3">
@@ -274,468 +214,135 @@ function GroupsView({ showCompleted, setShowCompleted }) {
           <span className="ml-2 inline-flex h-3 w-1.5 rounded-full bg-amber-400" /> Best-3rd race
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setOpenSet(allOpen ? new Set() : new Set(LETTERS))}
-            className="rounded-lg border border-slate-600/60 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-slate-800"
-          >
+          <button onClick={() => setOpenSet(allOpen ? new Set() : new Set(groups.map((g) => g.letter)))}
+            className="rounded-lg border border-slate-600/60 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-slate-800">
             {allOpen ? 'Collapse all' : 'Expand all'}
           </button>
-          <button
-            onClick={() => setShowCompleted((v) => !v)}
-            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-              showCompleted
-                ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40'
-                : 'border border-slate-600/60 text-slate-400 hover:bg-slate-800'
-            }`}
-          >
-            {showCompleted ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-            Completed matches
+          <button onClick={() => setShowCompleted((v) => !v)}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${showCompleted ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' : 'border border-slate-600/60 text-slate-400 hover:bg-slate-800'}`}>
+            {showCompleted ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />} Matches
           </button>
         </div>
       </div>
-
       <div className="grid gap-4 lg:grid-cols-2">
-        {LETTERS.map((L) => (
-          <GroupCard
-            key={L}
-            group={GROUPS[L]}
-            open={openSet.has(L)}
-            onToggle={() => toggle(L)}
-            showMatches={showCompleted}
-          />
-        ))}
+        {groups.map((g) => <GroupCard key={g.letter} group={g} open={openSet.has(g.letter)} onToggle={() => toggle(g.letter)} showMatches={showCompleted} />)}
       </div>
     </div>
   )
 }
 
-// ── Knockouts ───────────────────────────────────────────────────────────────
-function placeholder(slot) {
-  if (!slot) return 'TBD'
-  if (slot.type === 'team') return slot.code
-  const m = KO_BY_ID[slot.matchId]
-  return `${slot.type === 'winner' ? 'Winner' : 'Loser'} · ${m?.label || '?'}`
-}
-
-function TeamSlot({ team, slot, picked, isOther, onPick, now, iso }) {
-  const status = matchStatus(iso, now)
-  const clickable = !!team
-  const base =
-    'group/slot flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left transition w-full'
-  let cls
-  if (picked) {
-    cls = 'bg-gradient-to-r from-violet-500/30 to-fuchsia-500/20 ring-2 ring-violet-400/70 text-white shadow-lg shadow-violet-900/30'
-  } else if (isOther) {
-    cls = 'bg-slate-800/30 text-slate-400 ring-1 ring-slate-700/50'
-  } else if (clickable) {
-    cls = 'bg-slate-800/50 text-slate-200 ring-1 ring-slate-700/60 hover:ring-violet-400/60 hover:bg-slate-800'
-  } else {
-    cls = 'bg-slate-800/20 text-slate-500 ring-1 ring-dashed ring-slate-700/50 cursor-not-allowed'
-  }
-  return (
-    <button
-      type="button"
-      disabled={!clickable}
-      onClick={onPick}
-      className={`${base} ${cls} ${picked ? 'animate-pop' : ''}`}
-    >
-      {team ? <Flag team={team} className="h-5 w-7" /> : <span className="text-xl leading-none">⚽</span>}
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-semibold">
-          {team ? team.name : placeholder(slot)}
-        </span>
-        {team && slot.type === 'team' && (
-          <span className="block text-[10px] font-medium uppercase tracking-wide text-slate-400">
-            Seed {slot.code}
-          </span>
-        )}
-      </span>
-      {picked && (
-        <span className="flex items-center gap-1 rounded-full bg-violet-400/90 px-1.5 py-0.5 text-[9px] font-bold uppercase text-violet-950">
-          <Sparkles className="h-3 w-3" /> Pick
-        </span>
-      )}
-      {status === 'live' && !picked && <Radio className="h-4 w-4 animate-live-pulse text-rose-400" />}
-    </button>
-  )
-}
-
-function KOMatchCard({ match, preds, onPick, now }) {
-  const { a, b } = resolveMatch(match, preds)
-  const pick = preds[match.id]
-  const status = matchStatus(match.kickoff, now)
-  return (
-    <div className="rounded-2xl border border-slate-700/50 bg-slate-900/50 p-3 shadow-md shadow-black/20 backdrop-blur">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="text-[11px] font-bold uppercase tracking-wide text-slate-500">{match.label}</span>
-        <StatusPill status={status === 'live' ? 'live' : 'upcoming'} />
-      </div>
-      <div className="space-y-1.5">
-        <TeamSlot
-          team={a} slot={match.slotA} now={now} iso={match.kickoff}
-          picked={pick && a && pick === a.id}
-          isOther={pick && a && pick !== a.id}
-          onPick={() => a && onPick(match.id, a.id)}
-        />
-        <div className="flex items-center justify-center">
-          <span className="text-[10px] font-bold uppercase tracking-widest text-slate-600">vs</span>
-        </div>
-        <TeamSlot
-          team={b} slot={match.slotB} now={now} iso={match.kickoff}
-          picked={pick && b && pick === b.id}
-          isOther={pick && b && pick !== b.id}
-          onPick={() => b && onPick(match.id, b.id)}
-        />
-      </div>
-      <div className="mt-2.5 border-t border-slate-700/40 pt-2">
-        <VenueLine venue={match.venue} iso={match.kickoff} />
-      </div>
-    </div>
-  )
-}
-
-function KnockoutRound({ round, preds, onPick, now }) {
-  return (
-    <section>
-      <div className="mb-3 flex items-center gap-2">
-        <span className="text-xl">{round.icon}</span>
-        <h3 className="text-lg font-extrabold text-white">{round.title}</h3>
-        <span className="rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] font-semibold text-slate-400">
-          {round.matches.length} {round.matches.length === 1 ? 'match' : 'matches'}
-        </span>
-      </div>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {round.matches.map((m) => (
-          <KOMatchCard key={m.id} match={m} preds={preds} onPick={onPick} now={now} />
-        ))}
-      </div>
-    </section>
-  )
-}
-
-function PredictionSummary({ preds, now }) {
-  const made = Object.keys(preds).length
-  const champ = preds['final-1'] ? teamById(preds['final-1']) : null
-  return (
-    <div className="rounded-2xl border border-violet-500/30 bg-gradient-to-br from-violet-600/15 via-slate-900/40 to-fuchsia-600/10 p-4 shadow-lg shadow-violet-900/20">
-      <div className="mb-3 flex items-center gap-2">
-        <Target className="h-5 w-5 text-violet-300" />
-        <h3 className="text-base font-extrabold text-white">Your Predictions</h3>
-        <span className="ml-auto rounded-full bg-violet-500/20 px-2.5 py-0.5 text-xs font-bold text-violet-200 ring-1 ring-violet-400/40">
-          {made} / {totalKoMatches}
-        </span>
-      </div>
-
-      <div className="mb-3 h-2 overflow-hidden rounded-full bg-slate-800">
-        <div
-          className="h-full rounded-full bg-gradient-to-r from-violet-400 to-fuchsia-400 transition-all duration-500"
-          style={{ width: `${(made / totalKoMatches) * 100}%` }}
-        />
-      </div>
-
-      <div className="mb-4 flex items-center gap-3 rounded-xl border border-amber-400/30 bg-amber-400/10 p-3">
-        <Crown className="h-6 w-6 shrink-0 text-amber-300" />
-        <div className="min-w-0">
-          <div className="text-[10px] font-bold uppercase tracking-wide text-amber-300/80">Predicted Champion</div>
-          {champ ? (
-            <div className="flex items-center gap-2 text-lg font-black text-white">
-              <Flag team={champ} className="h-5 w-7" />
-              <span className="truncate">{champ.name}</span>
-            </div>
-          ) : (
-            <div className="text-sm text-slate-400">Pick your way through to the Final 🏆</div>
-          )}
-        </div>
-      </div>
-
-      <div className="space-y-3">
-        {KNOCKOUTS.map((round) => {
-          const picks = round.matches.filter((m) => preds[m.id])
-          if (!picks.length) return null
-          return (
-            <div key={round.key}>
-              <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">
-                {round.icon} {round.title}
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {picks.map((m) => {
-                  const t = teamById(preds[m.id])
-                  return (
-                    <span
-                      key={m.id}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-violet-500/15 px-2 py-1 text-xs font-medium text-violet-100 ring-1 ring-violet-500/30"
-                    >
-                      <Flag team={t} className="h-3 w-[18px]" /> {t.name}
-                    </span>
-                  )
-                })}
-              </div>
-            </div>
-          )
-        })}
-        {made === 0 && (
-          <p className="text-sm text-slate-400">
-            Tap a team in any knockout match to predict the winner. Your picks flow forward through
-            the bracket and are saved on this device.
-          </p>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function KnockoutView({ preds, onPick, onReset, showUpcoming, setShowUpcoming, now }) {
-  return (
-    <div className="grid gap-5 lg:grid-cols-[1fr_340px]">
-      <div className="order-2 space-y-7 lg:order-1">
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-700/50 bg-slate-900/40 p-3">
-          <p className="text-sm text-slate-300">
-            <span className="font-semibold text-white">Round of 32 → Final.</span>{' '}
-            Tap a team to predict the winner — picks advance automatically.
-          </p>
-          <button
-            onClick={() => setShowUpcoming((v) => !v)}
-            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-              showUpcoming
-                ? 'bg-sky-500/20 text-sky-300 ring-1 ring-sky-500/40'
-                : 'border border-slate-600/60 text-slate-400 hover:bg-slate-800'
-            }`}
-          >
-            {showUpcoming ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-            Upcoming matches
-          </button>
-        </div>
-
-        {showUpcoming ? (
-          <div className="space-y-7">
-            {KNOCKOUTS.map((round) => (
-              <KnockoutRound key={round.key} round={round} preds={preds} onPick={onPick} now={now} />
-            ))}
-          </div>
-        ) : (
-          <div className="rounded-2xl border border-dashed border-slate-700/60 bg-slate-900/30 p-8 text-center text-sm text-slate-400">
-            Upcoming matches hidden. Toggle them back on to make predictions.
-          </div>
-        )}
-      </div>
-
-      <div className="order-1 lg:order-2">
-        <div className="space-y-3 lg:sticky lg:top-4">
-          <PredictionSummary preds={preds} now={now} />
-          <button
-            onClick={onReset}
-            className="flex w-full items-center justify-center gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-semibold text-rose-300 transition hover:bg-rose-500/20"
-          >
-            <RotateCcw className="h-4 w-4" /> Reset all predictions
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Schedule (all matches, grouped by day) ──────────────────────────────────
-function buildSchedule() {
-  const rows = []
-  for (const L of LETTERS) {
-    for (const m of GROUPS[L].matches) {
-      rows.push({
-        id: m.id,
-        kickoff: m.kickoff,
-        venue: m.venue,
-        roundLabel: `Group ${L}`,
-        accent: GROUPS[L].accent,
-        group: m, // completed group match (has score)
-      })
-    }
-  }
-  for (const round of KNOCKOUTS) {
-    for (const m of round.matches) {
-      rows.push({
-        id: m.id,
-        kickoff: m.kickoff,
-        venue: m.venue,
-        roundLabel: round.title,
-        roundIcon: round.icon,
-        accent: ['#a78bfa', '#e879f9'],
-        ko: m,
-      })
-    }
-  }
-  rows.sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff))
-  return rows
-}
-const SCHEDULE = buildSchedule()
-
+// ── Schedule ────────────────────────────────────────────────────────────────
 function dayLabel(dayKey, todayKey) {
-  const diff = Math.round(
-    (new Date(`${dayKey}T12:00:00-07:00`) - new Date(`${todayKey}T12:00:00-07:00`)) / 86400000,
-  )
+  const diff = Math.round((new Date(`${dayKey}T12:00:00-07:00`) - new Date(`${todayKey}T12:00:00-07:00`)) / 86400000)
   if (diff === 0) return 'Today'
   if (diff === 1) return 'Tomorrow'
   if (diff === -1) return 'Yesterday'
   return null
 }
 
-function ScheduleTeam({ team, slot, align, win }) {
-  const name = team ? team.name : placeholder(slot)
-  return (
-    <div
-      className={`flex flex-1 items-center gap-2 ${align === 'right' ? 'flex-row-reverse text-right' : ''} ${
-        win ? 'font-bold text-white' : team ? 'text-slate-200' : 'text-slate-500'
-      }`}
-    >
-      <Flag team={team} />
-      <span className="truncate text-sm">{name}</span>
-    </div>
-  )
-}
-
-function ScheduleRow({ row, preds, now }) {
-  const [a1] = row.accent
-  let home, away, homeGoals, awayGoals, completed, status, slotA, slotB
-  if (row.group) {
-    home = row.group.home; away = row.group.away
-    homeGoals = row.group.homeGoals; awayGoals = row.group.awayGoals
-    completed = true; status = 'completed'
-  } else {
-    const r = resolveMatch(row.ko, preds)
-    home = r.a; away = r.b; slotA = row.ko.slotA; slotB = row.ko.slotB
-    status = matchStatus(row.kickoff, now)
-  }
-  const homeWin = completed && homeGoals > awayGoals
-  const awayWin = completed && awayGoals > homeGoals
+function ScheduleRow({ m }) {
+  const post = m.state === 'post'
+  const hw = post && m.home.score > m.away.score
+  const aw = post && m.away.score > m.home.score
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-slate-700/50 bg-slate-800/40 p-3 sm:flex-row sm:items-center">
-      <div className="flex w-full items-center justify-between gap-2 sm:w-44 sm:flex-col sm:items-start sm:justify-center">
+      <div className="flex w-full items-center justify-between gap-2 sm:w-40 sm:flex-col sm:items-start sm:justify-center">
         <div className="flex items-baseline gap-1">
           <span className="font-mono text-sm font-bold tabular-nums text-white">
-            {new Date(row.kickoff).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' })}
+            {new Date(m.date).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' })}
           </span>
           <span className="text-[10px] font-bold text-slate-500">PST</span>
         </div>
-        <span
-          className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-bold"
-          style={{ background: `${a1}26`, color: a1 }}
-        >
-          {row.roundIcon ? `${row.roundIcon} ` : ''}{row.roundLabel}
-        </span>
+        {m.round !== 'group' ? (
+          <span className="rounded-md bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-bold text-violet-300">{roundLabel(m.round)}</span>
+        ) : (
+          <span className="rounded-md bg-slate-700/60 px-1.5 py-0.5 text-[10px] font-bold text-slate-300">Group {m.group}</span>
+        )}
       </div>
-
       <div className="flex flex-1 items-center gap-2">
-        <ScheduleTeam team={home} slot={slotA} align="right" win={homeWin} />
-        <div className="flex shrink-0 items-center justify-center">
-          {completed ? (
-            <span className="flex items-center gap-1 rounded-lg bg-slate-900/70 px-2.5 py-1 font-mono text-sm font-bold tabular-nums">
-              <span className={homeWin ? 'text-emerald-400' : 'text-slate-200'}>{homeGoals}</span>
-              <span className="text-slate-500">:</span>
-              <span className={awayWin ? 'text-emerald-400' : 'text-slate-200'}>{awayGoals}</span>
-            </span>
-          ) : (
-            <span className="px-2 text-[10px] font-bold uppercase tracking-widest text-slate-600">vs</span>
-          )}
+        <div className={`flex flex-1 items-center justify-end gap-2 text-right text-sm ${hw ? 'font-bold text-white' : 'text-slate-200'}`}>
+          <span className="truncate">{m.home.name}</span><Flag team={m.home} />
         </div>
-        <ScheduleTeam team={away} slot={slotB} align="left" win={awayWin} />
+        <ScoreOrVs m={m} />
+        <div className={`flex flex-1 items-center gap-2 text-sm ${aw ? 'font-bold text-white' : 'text-slate-200'}`}>
+          <Flag team={m.away} /><span className="truncate">{m.away.name}</span>
+        </div>
       </div>
-
-      <div className="flex items-center justify-between gap-2 sm:w-52 sm:justify-end">
+      <div className="flex items-center justify-between gap-2 sm:w-48 sm:justify-end">
         <span className="inline-flex items-center gap-1 truncate text-xs text-slate-400">
-          <MapPin className="h-3.5 w-3.5 shrink-0" /> {row.venue.city}
+          <MapPin className="h-3.5 w-3.5 shrink-0" /> {m.venue.city || m.venue.stadium || ''}
         </span>
-        <StatusPill status={status} />
+        <StatusPill m={m} />
       </div>
     </div>
   )
 }
 
-function UpNext({ row, preds, now }) {
-  if (!row) return null
-  const isKo = !!row.ko
-  let home, away, slotA, slotB
-  if (isKo) {
-    const r = resolveMatch(row.ko, preds); home = r.a; away = r.b; slotA = row.ko.slotA; slotB = row.ko.slotB
-  } else { home = row.group.home; away = row.group.away }
-  const ms = new Date(row.kickoff) - now
+function UpNext({ m, now }) {
+  if (!m) return null
+  const live = m.state === 'in'
+  const ms = new Date(m.date) - now
   const hrs = Math.max(0, Math.floor(ms / 3600000))
   const days = Math.floor(hrs / 24)
-  const countdown = days > 0 ? `in ${days}d ${hrs % 24}h` : hrs > 0 ? `in ${hrs}h` : 'starting soon'
+  const countdown = live ? 'Live now' : days > 0 ? `in ${days}d ${hrs % 24}h` : hrs > 0 ? `in ${hrs}h` : 'starting soon'
   return (
-    <div className="rounded-2xl border border-sky-500/30 bg-gradient-to-br from-sky-600/15 via-slate-900/40 to-violet-600/10 p-4 shadow-lg shadow-sky-900/20">
+    <div className={`rounded-2xl border p-4 shadow-lg ${live ? 'border-rose-500/40 bg-gradient-to-br from-rose-600/15 via-slate-900/40 to-orange-600/10 shadow-rose-900/20' : 'border-sky-500/30 bg-gradient-to-br from-sky-600/15 via-slate-900/40 to-violet-600/10 shadow-sky-900/20'}`}>
       <div className="mb-2 flex items-center justify-between">
-        <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-sky-300">
-          <Clock className="h-4 w-4" /> Up next · {countdown}
+        <span className={`inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide ${live ? 'text-rose-300' : 'text-sky-300'}`}>
+          {live ? <Radio className="h-4 w-4 animate-live-pulse" /> : <Clock className="h-4 w-4" />} {live ? 'Live now' : `Up next · ${countdown}`}
         </span>
-        <span className="text-xs font-semibold text-slate-300">{row.roundLabel}</span>
+        <span className="text-xs font-semibold text-slate-300">{m.round === 'group' ? `Group ${m.group}` : roundLabel(m.round)}</span>
       </div>
       <div className="flex items-center justify-center gap-3 py-1">
         <div className="flex flex-1 items-center justify-end gap-2 text-right text-base font-bold text-white">
-          <span className="truncate">{home ? home.name : placeholder(slotA)}</span>
-          <Flag team={home} className="h-5 w-7" />
+          <span className="truncate">{m.home.name}</span><Flag team={m.home} className="h-5 w-7" />
         </div>
-        <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">vs</span>
+        {m.state === 'pre' ? <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">vs</span> : <ScoreOrVs m={m} />}
         <div className="flex flex-1 items-center gap-2 text-base font-bold text-white">
-          <Flag team={away} className="h-5 w-7" />
-          <span className="truncate">{away ? away.name : placeholder(slotB)}</span>
+          <Flag team={m.away} className="h-5 w-7" /><span className="truncate">{m.away.name}</span>
         </div>
       </div>
       <div className="mt-2 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs text-slate-400">
-        <span className="inline-flex items-center gap-1"><Calendar className="h-3.5 w-3.5" /> {fmtDate(row.kickoff, { weekday: 'long' })}</span>
-        <span className="inline-flex items-center gap-1"><Clock className="h-3.5 w-3.5" /> {fmtTime(row.kickoff)}</span>
-        <span className="inline-flex items-center gap-1"><MapPin className="h-3.5 w-3.5" /> {row.venue.stadium}, {row.venue.city}</span>
+        <span className="inline-flex items-center gap-1"><Calendar className="h-3.5 w-3.5" /> {fmtDate(m.date, { weekday: 'long' })}</span>
+        <span className="inline-flex items-center gap-1"><Clock className="h-3.5 w-3.5" /> {fmtTime(m.date)}</span>
+        {m.venue.stadium && <span className="inline-flex items-center gap-1"><MapPin className="h-3.5 w-3.5" /> {m.venue.stadium}, {m.venue.city}</span>}
       </div>
     </div>
   )
 }
 
-function ScheduleView({ preds, now }) {
+function ScheduleView({ schedule, now }) {
   const [showPast, setShowPast] = useState(false)
   const todayKey = fmtDayKey(now)
-
   const days = useMemo(() => {
     const map = new Map()
-    for (const row of SCHEDULE) {
-      const key = fmtDayKey(row.kickoff)
+    for (const m of schedule) {
+      const key = fmtDayKey(m.date)
       if (!map.has(key)) map.set(key, [])
-      map.get(key).push(row)
+      map.get(key).push(m)
     }
     return [...map.entries()].map(([key, rows]) => ({ key, rows }))
-  }, [])
+  }, [schedule])
 
-  // Next *unplayed* match: group games are all completed (have scores), so the
-  // next real fixture is the soonest knockout that hasn't kicked off yet.
-  const upNext = useMemo(
-    () => SCHEDULE.find((r) => r.ko && new Date(r.kickoff).getTime() > now),
-    [now],
-  )
+  const upNext = useMemo(() => {
+    const liveM = schedule.find((m) => m.state === 'in')
+    if (liveM) return liveM
+    return schedule.find((m) => m.state === 'pre' && new Date(m.date).getTime() > now - 2 * 3600000)
+  }, [schedule, now])
 
   const visibleDays = showPast ? days : days.filter((d) => d.key >= todayKey)
 
   return (
     <div className="space-y-5">
-      <UpNext row={upNext} preds={preds} now={now} />
-
+      <UpNext m={upNext} now={now} />
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-700/50 bg-slate-900/40 p-3">
-        <p className="text-sm text-slate-300">
-          Every match in kickoff order — <span className="font-semibold text-white">all times PST</span>.
-        </p>
-        <button
-          onClick={() => setShowPast((v) => !v)}
-          className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-            showPast
-              ? 'bg-slate-700/60 text-slate-200 ring-1 ring-slate-500/40'
-              : 'border border-slate-600/60 text-slate-400 hover:bg-slate-800'
-          }`}
-        >
-          {showPast ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-          Past days
+        <p className="text-sm text-slate-300">Every match in kickoff order — <span className="font-semibold text-white">all times PST</span>.</p>
+        <button onClick={() => setShowPast((v) => !v)}
+          className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${showPast ? 'bg-slate-700/60 text-slate-200 ring-1 ring-slate-500/40' : 'border border-slate-600/60 text-slate-400 hover:bg-slate-800'}`}>
+          {showPast ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />} Past days
         </button>
       </div>
-
-      {visibleDays.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-slate-700/60 bg-slate-900/30 p-8 text-center text-sm text-slate-400">
-          No matches to show.
-        </div>
-      ) : (
+      {visibleDays.length === 0 ? <Empty>No matches to show.</Empty> : (
         <div className="space-y-6">
           {visibleDays.map((day) => {
             const rel = dayLabel(day.key, todayKey)
@@ -743,29 +350,11 @@ function ScheduleView({ preds, now }) {
             return (
               <section key={day.key}>
                 <div className="mb-2.5 flex items-center gap-2">
-                  {rel && (
-                    <span
-                      className={`rounded-lg px-2 py-0.5 text-xs font-extrabold uppercase tracking-wide ${
-                        isToday
-                          ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40'
-                          : 'bg-slate-700/50 text-slate-300'
-                      }`}
-                    >
-                      {rel}
-                    </span>
-                  )}
-                  <h3 className="text-base font-bold text-white">
-                    {fmtDate(day.rows[0].kickoff, { weekday: 'long' })}
-                  </h3>
-                  <span className="rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] font-semibold text-slate-400">
-                    {day.rows.length} {day.rows.length === 1 ? 'match' : 'matches'}
-                  </span>
+                  {rel && <span className={`rounded-lg px-2 py-0.5 text-xs font-extrabold uppercase tracking-wide ${isToday ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' : 'bg-slate-700/50 text-slate-300'}`}>{rel}</span>}
+                  <h3 className="text-base font-bold text-white">{fmtDate(day.rows[0].date, { weekday: 'long' })}</h3>
+                  <span className="rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] font-semibold text-slate-400">{day.rows.length} {day.rows.length === 1 ? 'match' : 'matches'}</span>
                 </div>
-                <div className="space-y-2">
-                  {day.rows.map((row) => (
-                    <ScheduleRow key={row.id} row={row} preds={preds} now={now} />
-                  ))}
-                </div>
+                <div className="space-y-2">{day.rows.map((m) => <ScheduleRow key={m.id} m={m} />)}</div>
               </section>
             )
           })}
@@ -775,14 +364,187 @@ function ScheduleView({ preds, now }) {
   )
 }
 
-// ── Live clock in the header ────────────────────────────────────────────────
+// ── Knockouts + predictions ─────────────────────────────────────────────────
+function roundLabel(key) {
+  const meta = ROUND_META.find((r) => r.key === key)
+  return meta ? meta.title : key
+}
+function winnerId(m) {
+  if (m.state !== 'post') return null
+  if (m.home.winner) return m.home.id
+  if (m.away.winner) return m.away.id
+  if (m.home.score != null && m.away.score != null) {
+    if (m.home.score > m.away.score) return m.home.id
+    if (m.away.score > m.home.score) return m.away.id
+  }
+  return null
+}
+
+function KOTeam({ team, picked, isOther, locked, correct, onPick }) {
+  // A concrete team always carries a logo; ESPN's bracket placeholders
+  // (e.g. "Group F 2nd Place") don't — those aren't predictable.
+  const real = !!(team && team.logo && team.name !== 'TBD')
+  const clickable = real && !locked
+  let cls
+  if (correct === true) cls = 'bg-emerald-500/20 ring-2 ring-emerald-400/70 text-white'
+  else if (correct === false) cls = 'bg-slate-800/40 ring-1 ring-slate-700/50 text-slate-400 line-through decoration-slate-500'
+  else if (picked) cls = 'bg-gradient-to-r from-violet-500/30 to-fuchsia-500/20 ring-2 ring-violet-400/70 text-white shadow-lg shadow-violet-900/30'
+  else if (isOther) cls = 'bg-slate-800/30 text-slate-400 ring-1 ring-slate-700/50'
+  else if (clickable) cls = 'bg-slate-800/50 text-slate-200 ring-1 ring-slate-700/60 hover:ring-violet-400/60 hover:bg-slate-800'
+  else cls = 'bg-slate-800/20 text-slate-500 ring-1 ring-dashed ring-slate-700/50 cursor-not-allowed'
+  return (
+    <button type="button" disabled={!clickable} onClick={onPick}
+      className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left transition ${cls} ${picked && correct === null ? 'animate-pop' : ''}`}>
+      <Flag team={real ? team : null} className="h-5 w-7" />
+      <span className="min-w-0 flex-1 truncate text-sm font-semibold">{real ? team.name : 'TBD'}</span>
+      {correct === true && <Check className="h-4 w-4 text-emerald-400" />}
+      {correct === false && <X className="h-4 w-4 text-slate-500" />}
+      {picked && correct === null && (
+        <span className="flex items-center gap-1 rounded-full bg-violet-400/90 px-1.5 py-0.5 text-[9px] font-bold uppercase text-violet-950">
+          <Sparkles className="h-3 w-3" /> Pick
+        </span>
+      )}
+    </button>
+  )
+}
+
+function KOMatch({ m, pick, onPick }) {
+  const locked = m.state !== 'pre'
+  const win = winnerId(m)
+  const gradeFor = (id) => (win && pick ? (pick === win ? id === win : id === pick ? false : null) : null)
+  return (
+    <div className="rounded-2xl border border-slate-700/50 bg-slate-900/50 p-3 shadow-md shadow-black/20 backdrop-blur">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-[11px] font-bold uppercase tracking-wide text-slate-500">{roundLabel(m.round)}</span>
+        <StatusPill m={m} />
+      </div>
+      {locked && (m.home.score != null) && (
+        <div className="mb-2 flex justify-center"><ScoreOrVs m={m} /></div>
+      )}
+      <div className="space-y-1.5">
+        <KOTeam team={m.home} picked={pick === m.home.id} isOther={pick && pick !== m.home.id} locked={locked} correct={gradeFor(m.home.id)} onPick={() => onPick(m.id, m.home.id)} />
+        <div className="flex items-center justify-center"><span className="text-[10px] font-bold uppercase tracking-widest text-slate-600">vs</span></div>
+        <KOTeam team={m.away} picked={pick === m.away.id} isOther={pick && pick !== m.away.id} locked={locked} correct={gradeFor(m.away.id)} onPick={() => onPick(m.id, m.away.id)} />
+      </div>
+      <div className="mt-2.5 border-t border-slate-700/40 pt-2"><VenueLine m={m} /></div>
+    </div>
+  )
+}
+
+function PredictionSummary({ rounds, preds }) {
+  const koMatches = rounds.flatMap((r) => r.matches)
+  const predictable = koMatches.filter((m) => m.home.logo && m.away.logo)
+  const made = koMatches.filter((m) => preds[m.id]).length
+  let correct = 0, decided = 0
+  for (const m of koMatches) {
+    const w = winnerId(m)
+    if (w && preds[m.id]) { decided++; if (preds[m.id] === w) correct++ }
+  }
+  const finalM = rounds.find((r) => r.key === 'final')?.matches[0]
+  const champId = finalM ? preds[finalM.id] : null
+  const champ = champId ? koMatches.flatMap((m) => [m.home, m.away]).find((t) => t.id === champId) : null
+  const denom = predictable.length || koMatches.length
+
+  return (
+    <div className="rounded-2xl border border-violet-500/30 bg-gradient-to-br from-violet-600/15 via-slate-900/40 to-fuchsia-600/10 p-4 shadow-lg shadow-violet-900/20">
+      <div className="mb-3 flex items-center gap-2">
+        <Target className="h-5 w-5 text-violet-300" />
+        <h3 className="text-base font-extrabold text-white">Your Predictions</h3>
+        <span className="ml-auto rounded-full bg-violet-500/20 px-2.5 py-0.5 text-xs font-bold text-violet-200 ring-1 ring-violet-400/40">{made}{denom ? ` / ${denom}` : ''}</span>
+      </div>
+      {decided > 0 && (
+        <div className="mb-3 inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-300 ring-1 ring-emerald-500/30">
+          <Check className="h-3.5 w-3.5" /> {correct} of {decided} correct so far
+        </div>
+      )}
+      <div className="mb-4 flex items-center gap-3 rounded-xl border border-amber-400/30 bg-amber-400/10 p-3">
+        <Crown className="h-6 w-6 shrink-0 text-amber-300" />
+        <div className="min-w-0">
+          <div className="text-[10px] font-bold uppercase tracking-wide text-amber-300/80">Predicted Champion</div>
+          {champ ? (
+            <div className="flex items-center gap-2 text-lg font-black text-white"><Flag team={champ} className="h-5 w-7" /><span className="truncate">{champ.name}</span></div>
+          ) : <div className="text-sm text-slate-400">Pick the winner of the Final 🏆</div>}
+        </div>
+      </div>
+      <div className="space-y-3">
+        {rounds.map((round) => {
+          const picks = round.matches.filter((m) => preds[m.id])
+          if (!picks.length) return null
+          return (
+            <div key={round.key}>
+              <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">{round.icon} {round.title}</div>
+              <div className="flex flex-wrap gap-1.5">
+                {picks.map((m) => {
+                  const t = [m.home, m.away].find((x) => x.id === preds[m.id])
+                  const w = winnerId(m)
+                  const ok = w ? preds[m.id] === w : null
+                  return (
+                    <span key={m.id} className={`inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium ring-1 ${ok === true ? 'bg-emerald-500/15 text-emerald-100 ring-emerald-500/30' : ok === false ? 'bg-slate-700/30 text-slate-400 ring-slate-600/40 line-through' : 'bg-violet-500/15 text-violet-100 ring-violet-500/30'}`}>
+                      <Flag team={t} className="h-3 w-[18px]" /> {t ? t.name : ''}
+                    </span>
+                  )
+                })}
+              </div>
+            </div>
+          )
+        })}
+        {made === 0 && <p className="text-sm text-slate-400">Tap a team in any knockout match to predict the winner. Picks are saved on this device and graded against the real result.</p>}
+      </div>
+    </div>
+  )
+}
+
+function KnockoutView({ rounds, preds, onPick, onReset, showUpcoming, setShowUpcoming }) {
+  if (!rounds.length) {
+    return <Empty>Knockout fixtures will appear here once the bracket is set after the group stage.</Empty>
+  }
+  return (
+    <div className="grid gap-5 lg:grid-cols-[1fr_340px]">
+      <div className="order-2 space-y-7 lg:order-1">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-700/50 bg-slate-900/40 p-3">
+          <p className="text-sm text-slate-300"><span className="font-semibold text-white">Predict the winners.</span> Picks lock at kickoff and are graded against the real result.</p>
+          <button onClick={() => setShowUpcoming((v) => !v)}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${showUpcoming ? 'bg-sky-500/20 text-sky-300 ring-1 ring-sky-500/40' : 'border border-slate-600/60 text-slate-400 hover:bg-slate-800'}`}>
+            {showUpcoming ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />} Matches
+          </button>
+        </div>
+        {showUpcoming ? (
+          <div className="space-y-7">
+            {rounds.map((round) => (
+              <section key={round.key}>
+                <div className="mb-3 flex items-center gap-2">
+                  <span className="text-xl">{round.icon}</span>
+                  <h3 className="text-lg font-extrabold text-white">{round.title}</h3>
+                  <span className="rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] font-semibold text-slate-400">{round.matches.length} {round.matches.length === 1 ? 'match' : 'matches'}</span>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  {round.matches.map((m) => <KOMatch key={m.id} m={m} pick={preds[m.id]} onPick={onPick} />)}
+                </div>
+              </section>
+            ))}
+          </div>
+        ) : <Empty>Matches hidden. Toggle them back on to make predictions.</Empty>}
+      </div>
+      <div className="order-1 lg:order-2">
+        <div className="space-y-3 lg:sticky lg:top-4">
+          <PredictionSummary rounds={rounds} preds={preds} />
+          <button onClick={onReset} className="flex w-full items-center justify-center gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-semibold text-rose-300 transition hover:bg-rose-500/20">
+            <RotateCcw className="h-4 w-4" /> Reset all predictions
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Chrome ──────────────────────────────────────────────────────────────────
+function Empty({ children }) {
+  return <div className="rounded-2xl border border-dashed border-slate-700/60 bg-slate-900/30 p-8 text-center text-sm text-slate-400">{children}</div>
+}
+
 function LiveClock({ now }) {
-  const time = new Date(now).toLocaleTimeString('en-US', {
-    hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'America/Los_Angeles',
-  })
-  const date = new Date(now).toLocaleDateString('en-US', {
-    weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles',
-  })
+  const time = new Date(now).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'America/Los_Angeles' })
+  const date = new Date(now).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' })
   return (
     <div className="flex items-center gap-2 rounded-full border border-slate-700/60 bg-slate-900/60 px-3 py-1.5 backdrop-blur">
       <span className="h-2 w-2 animate-live-pulse rounded-full bg-emerald-400" />
@@ -793,128 +555,114 @@ function LiveClock({ now }) {
   )
 }
 
+function TabButton({ active, onClick, icon, children }) {
+  return (
+    <button onClick={onClick}
+      className={`inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition ${active ? 'bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white shadow-lg shadow-violet-900/40' : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'}`}>
+      {icon}{children}
+    </button>
+  )
+}
+
+function UpdatedBadge({ updatedAt, stale, loading, onRefresh }) {
+  const label = updatedAt ? new Date(updatedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' }) : '—'
+  return (
+    <button onClick={onRefresh} title="Refresh now"
+      className="inline-flex items-center gap-1.5 rounded-full border border-slate-700/60 bg-slate-900/60 px-3 py-1.5 text-xs text-slate-400 transition hover:text-slate-200">
+      <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+      {stale ? <span className="font-semibold text-amber-300">Showing last good data</span> : <>Updated {label} PST</>}
+    </button>
+  )
+}
+
 // ── Root ────────────────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState('groups')
   const [showCompleted, setShowCompleted] = useState(true)
   const [showUpcoming, setShowUpcoming] = useState(true)
   const [now, setNow] = useState(() => Date.now())
-  const [preds, setPreds] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem(PRED_KEY)) || {}
-    } catch {
-      return {}
-    }
-  })
+  const [feed, setFeed] = useState(null) // { updatedAt, matches, stale }
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [preds, setPreds] = useState(() => { try { return JSON.parse(localStorage.getItem(PRED_KEY)) || {} } catch { return {} } })
+  const mounted = useRef(true)
 
-  // Live tick — drives the clock and any "live" match windows.
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(id)
+  const refresh = useMemo(() => async () => {
+    setLoading(true)
+    try {
+      const data = await loadTournament()
+      if (!mounted.current) return
+      setFeed(data); setError(null)
+    } catch (e) {
+      if (!mounted.current) return
+      setError(e.message || 'Could not load live data')
+    } finally {
+      if (mounted.current) setLoading(false)
+    }
   }, [])
 
   useEffect(() => {
-    localStorage.setItem(PRED_KEY, JSON.stringify(preds))
-  }, [preds])
+    mounted.current = true
+    refresh()
+    const clock = setInterval(() => setNow(Date.now()), 1000)
+    const poll = setInterval(() => { if (document.visibilityState === 'visible') refresh() }, REFRESH_MS)
+    const onVis = () => { if (document.visibilityState === 'visible') refresh() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => { mounted.current = false; clearInterval(clock); clearInterval(poll); document.removeEventListener('visibilitychange', onVis) }
+  }, [refresh])
 
-  const onPick = (matchId, teamId) =>
-    setPreds((p) => prune({ ...p, [matchId]: teamId }))
+  useEffect(() => { localStorage.setItem(PRED_KEY, JSON.stringify(preds)) }, [preds])
 
-  const onReset = () => {
-    if (window.confirm('Clear all knockout predictions?')) setPreds({})
-  }
+  const views = useMemo(() => (feed ? buildViews(feed.matches) : null), [feed])
 
-  const completedCount = useMemo(
-    () => LETTERS.reduce((n, L) => n + GROUPS[L].matches.length, 0),
-    [],
-  )
+  const onPick = (matchId, teamId) => setPreds((p) => ({ ...p, [matchId]: p[matchId] === teamId ? undefined : teamId }))
+  const onReset = () => { if (window.confirm('Clear all knockout predictions?')) setPreds({}) }
 
   return (
     <div className="mx-auto min-h-screen max-w-6xl px-4 pb-16 pt-5 sm:px-6">
-      {/* Header */}
       <header className="mb-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-400 via-orange-500 to-rose-500 text-2xl shadow-lg shadow-orange-900/40">
-              🏆
-            </div>
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-400 via-orange-500 to-rose-500 text-2xl shadow-lg shadow-orange-900/40">🏆</div>
             <div>
-              <h1 className="text-xl font-black leading-tight text-white sm:text-2xl">
-                World Cup <span className="bg-gradient-to-r from-amber-300 to-rose-400 bg-clip-text text-transparent">2026</span>
-              </h1>
-              <p className="text-xs text-slate-400">Groups · Standings · Knockouts · Predictions</p>
+              <h1 className="text-xl font-black leading-tight text-white sm:text-2xl">World Cup <span className="bg-gradient-to-r from-amber-300 to-rose-400 bg-clip-text text-transparent">2026</span></h1>
+              <p className="text-xs text-slate-400">Live scores · Standings · Schedule · Your predictions</p>
             </div>
           </div>
-          <LiveClock now={now} />
+          <div className="flex items-center gap-2">
+            <UpdatedBadge updatedAt={feed?.updatedAt} stale={feed?.stale} loading={loading} onRefresh={refresh} />
+            <LiveClock now={now} />
+          </div>
         </div>
       </header>
 
-      {/* Tabs */}
       <div className="mb-6 grid grid-cols-3 gap-1.5 rounded-2xl border border-slate-700/50 bg-slate-900/50 p-1.5 backdrop-blur sm:inline-grid sm:grid-flow-col">
-        <TabButton active={tab === 'groups'} onClick={() => setTab('groups')} icon={<Trophy className="h-4 w-4" />}>
-          Groups
-        </TabButton>
-        <TabButton active={tab === 'schedule'} onClick={() => setTab('schedule')} icon={<CalendarDays className="h-4 w-4" />}>
-          Schedule
-        </TabButton>
-        <TabButton active={tab === 'knockouts'} onClick={() => setTab('knockouts')} icon={<Target className="h-4 w-4" />}>
-          Knockouts
-        </TabButton>
+        <TabButton active={tab === 'groups'} onClick={() => setTab('groups')} icon={<Trophy className="h-4 w-4" />}>Groups</TabButton>
+        <TabButton active={tab === 'schedule'} onClick={() => setTab('schedule')} icon={<CalendarDays className="h-4 w-4" />}>Schedule</TabButton>
+        <TabButton active={tab === 'knockouts'} onClick={() => setTab('knockouts')} icon={<Target className="h-4 w-4" />}>Knockouts</TabButton>
       </div>
 
-      {/* Content */}
       <main className="animate-fade-in">
-        {tab === 'groups' && (
-          <>
-            <div className="mb-4 flex flex-wrap gap-2 text-xs text-slate-400">
-              <Stat label="Groups" value="12" />
-              <Stat label="Teams" value="48" />
-              <Stat label="Group matches" value={String(completedCount)} />
-            </div>
-            <GroupsView showCompleted={showCompleted} setShowCompleted={setShowCompleted} />
-          </>
+        {!views && loading && <Empty><span className="inline-flex items-center gap-2"><RefreshCw className="h-4 w-4 animate-spin" /> Loading live World Cup data…</span></Empty>}
+        {!views && error && !loading && (
+          <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 p-6 text-center">
+            <AlertTriangle className="mx-auto mb-2 h-7 w-7 text-rose-300" />
+            <p className="mb-3 text-sm text-rose-200">Couldn't load live data: {error}</p>
+            <button onClick={refresh} className="inline-flex items-center gap-2 rounded-lg bg-rose-500/20 px-4 py-2 text-sm font-semibold text-rose-200 ring-1 ring-rose-500/40 hover:bg-rose-500/30"><RefreshCw className="h-4 w-4" /> Try again</button>
+          </div>
         )}
-        {tab === 'schedule' && <ScheduleView preds={preds} now={now} />}
-        {tab === 'knockouts' && (
-          <KnockoutView
-            preds={preds}
-            onPick={onPick}
-            onReset={onReset}
-            showUpcoming={showUpcoming}
-            setShowUpcoming={setShowUpcoming}
-            now={now}
-          />
+        {views && (
+          <>
+            {tab === 'groups' && <GroupsView groups={views.groups} showCompleted={showCompleted} setShowCompleted={setShowCompleted} />}
+            {tab === 'schedule' && <ScheduleView schedule={views.schedule} now={now} />}
+            {tab === 'knockouts' && <KnockoutView rounds={views.rounds} preds={preds} onPick={onPick} onReset={onReset} showUpcoming={showUpcoming} setShowUpcoming={setShowUpcoming} />}
+          </>
         )}
       </main>
 
       <footer className="mt-12 border-t border-slate-800 pt-5 text-center text-xs text-slate-500">
-        All times shown in PST · Predictions saved to this device · Group results are illustrative seed data
+        Live data from ESPN · All times PST · Predictions are yours, saved to this device
       </footer>
     </div>
-  )
-}
-
-function TabButton({ active, onClick, icon, children }) {
-  return (
-    <button
-      onClick={onClick}
-      className={`inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-bold transition ${
-        active
-          ? 'bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white shadow-lg shadow-violet-900/40'
-          : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'
-      }`}
-    >
-      {icon}
-      {children}
-    </button>
-  )
-}
-
-function Stat({ label, value }) {
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700/50 bg-slate-900/40 px-3 py-1.5">
-      <span className="font-bold text-white">{value}</span>
-      <span className="text-slate-400">{label}</span>
-    </span>
   )
 }

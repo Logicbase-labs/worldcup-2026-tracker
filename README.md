@@ -58,9 +58,24 @@ src/
   index.css # Tailwind + background + animations
 ```
 
-## Notes on the data
+## Live data
 
-Group results are **illustrative**, generated deterministically (seeded) so
-standings are stable across reloads and devices. Swap the generator in
-`src/data.js` for official fixtures/results when they're available — the
-standings, qualification, and bracket all derive from that data automatically.
+Scores, fixtures, standings, and venues are **real and live** — pulled from
+ESPN's public FIFA World Cup feed. No scores are generated; the app only buckets
+the live matches into groups / schedule / rounds and computes standings from the
+real results. Predictions are made **by the user** (never auto-predicted) and are
+graded ✅/❌ against the actual outcome once a match finishes.
+
+The data layer auto-refreshes every ~45s while the tab is open, shows a "last
+updated" stamp, and degrades gracefully (loading / error / last-good states).
+
+### Data source — two modes (`src/config.js`)
+
+- **ESPN direct (default, `WC_API = ''`)** — the browser calls ESPN's feed
+  directly. Zero infrastructure, free, works on GitHub Pages as-is.
+- **Cloudflare Worker (recommended for scale, free tier)** — deploy
+  `cloudflare/worker.js` (`wrangler deploy`) and set `WC_API` to its URL. The
+  Worker fetches ESPN once, caches the assembled tournament (~30s), serves it to
+  everyone, and keeps serving the last-good feed if ESPN blips. This makes the
+  app rate-limit-proof no matter how many people open it. Cost: **$0** on the
+  Workers free plan.
