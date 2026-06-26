@@ -11,7 +11,7 @@ VAPID_SUBJECT = "mailto:info@musenailandspa.com"
 # id is filled in after: wrangler kv namespace create SUBS
 [[kv_namespaces]]
 binding = "SUBS"
-id = "REPLACE_WITH_KV_ID"
+id = "d2cf61edecc34396aec284905ba1d2c8"
 
 # Every-minute watcher that turns live-feed changes into push alerts.
 [triggers]
