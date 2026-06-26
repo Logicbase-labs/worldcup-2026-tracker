@@ -626,7 +626,7 @@ function exportBracketPNG(nodes, preds, champ) {
   ctx.textAlign = 'left'
 
   ctx.fillStyle = '#64748b'; ctx.font = '600 17px Inter, sans-serif'
-  ctx.fillText('Make your picks + live scores · musenail.github.io/worldcup-2026-tracker', M, H - 38)
+  ctx.fillText('Make your picks + live scores · logicbase-labs.github.io/worldcup-2026-tracker', M, H - 38)
 
   cv.toBlob(async (blob) => {
     if (!blob) return
