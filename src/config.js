@@ -10,3 +10,6 @@ export const WC_API = 'https://worldcup-2026-api.musenailandspa.workers.dev'
 
 // How often to refresh live data while the tab is open (ms).
 export const REFRESH_MS = 45000
+
+// Web Push VAPID public key (safe to expose; private key is a Worker secret).
+export const VAPID_PUBLIC = 'BB50_RHiHBawxjgCCthJyEZn1stDe9snvx8ta0Nk6oFkTYqF2zL6yvhUNMwb_PbfgRx3_IBvVU2tdumDOtwsme0'

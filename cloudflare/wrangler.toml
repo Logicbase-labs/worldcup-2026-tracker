@@ -2,5 +2,20 @@ name = "worldcup-2026-api"
 main = "worker.js"
 compatibility_date = "2024-11-01"
 
-# No bindings, secrets, or KV needed — the feed is public ESPN data and caching
-# uses the built-in Cache API. Deploy with: wrangler deploy (from this folder).
+# Public, non-secret values.
+[vars]
+VAPID_PUBLIC = "BB50_RHiHBawxjgCCthJyEZn1stDe9snvx8ta0Nk6oFkTYqF2zL6yvhUNMwb_PbfgRx3_IBvVU2tdumDOtwsme0"
+VAPID_SUBJECT = "mailto:info@musenailandspa.com"
+
+# Push subscriptions + last-seen match state.
+# id is filled in after: wrangler kv namespace create SUBS
+[[kv_namespaces]]
+binding = "SUBS"
+id = "REPLACE_WITH_KV_ID"
+
+# Every-minute watcher that turns live-feed changes into push alerts.
+[triggers]
+crons = ["* * * * *"]
+
+# Secret (set separately, NOT in this file):
+#   wrangler secret put VAPID_PRIVATE   (value from cloudflare/.vapid.json "private")

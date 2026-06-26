@@ -13,6 +13,8 @@
 //  - if a rebuild fails entirely, the last successfully assembled feed is served
 //  - CORS open so the static GitHub Pages app can read it from the browser
 
+import { handlePushRoute, runWatcher } from './push.js'
+
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard'
 const TOURNAMENT_START = '2026-06-11'
 const TOURNAMENT_END = '2026-07-19'
@@ -26,9 +28,10 @@ const CORS = {
 }
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url)
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS })
+    if (url.pathname.startsWith('/push/')) return handlePushRoute(request, env)
     if (url.pathname === '/' || url.pathname === '/health') {
       return json({ ok: true, service: 'worldcup-2026 live feed', endpoint: '/tournament' })
     }
@@ -61,6 +64,18 @@ export default {
       }
       return json({ error: 'upstream unavailable', detail: String(err) }, 502)
     }
+  },
+
+  // Cron: watch the live feed and fire goal / kickoff / final / starting-soon alerts.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil((async () => {
+      try {
+        const feed = await buildTournament()
+        await runWatcher(env, feed.matches, Date.now())
+      } catch (err) {
+        console.log('watcher error', String(err))
+      }
+    })())
   },
 }
 

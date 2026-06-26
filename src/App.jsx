@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Trophy, Calendar, CalendarDays, MapPin, ChevronDown, Clock, RotateCcw,
-  Eye, EyeOff, Sparkles, Crown, Target, Radio, RefreshCw, AlertTriangle, Check, X, Share2,
+  Eye, EyeOff, Sparkles, Crown, Target, Radio, RefreshCw, AlertTriangle, Check, X, Share2, Bell,
 } from 'lucide-react'
 import { loadTournament } from './api.js'
 import { REFRESH_MS } from './config.js'
+import { enableNotifications, disableNotifications, updatePrefs, sendTest, loadPrefs, isEnabled, pushSupported, needsInstall } from './pushClient.js'
 import { buildViews, ROUND_META, fmtDate, fmtTime, fmtDayKey } from './data.js'
 import { buildBracket, resolveNodeInfo, winnerTeamOf, realWinnerId, prunePicks, FEEDERS } from './bracket.js'
 
@@ -716,6 +717,107 @@ function Empty({ children }) {
   return <div className="rounded-2xl border border-dashed border-slate-700/60 bg-slate-900/30 p-8 text-center text-sm text-slate-400">{children}</div>
 }
 
+function NotifToggle({ on, onClick, label, desc }) {
+  return (
+    <button onClick={onClick} className="flex w-full items-center justify-between gap-3 rounded-xl border border-slate-700/50 bg-slate-800/40 px-3 py-2.5 text-left">
+      <span>
+        <span className="block text-sm font-semibold text-slate-100">{label}</span>
+        {desc && <span className="block text-xs text-slate-400">{desc}</span>}
+      </span>
+      <span className={`relative h-6 w-11 shrink-0 rounded-full transition ${on ? 'bg-violet-500' : 'bg-slate-600'}`}>
+        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${on ? 'left-[22px]' : 'left-0.5'}`} />
+      </span>
+    </button>
+  )
+}
+const scopeBtn = (active) => `rounded-xl px-3 py-2 text-sm font-semibold transition ${active ? 'bg-violet-500/25 text-violet-100 ring-1 ring-violet-400/50' : 'border border-slate-600/60 text-slate-300 hover:bg-slate-800'}`
+
+function NotificationsModal({ teams, onClose }) {
+  const [prefs, setPrefs] = useState(loadPrefs)
+  const [enabled, setEnabled] = useState(isEnabled())
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const supported = pushSupported()
+  const install = needsInstall()
+
+  const apply = (next) => { setPrefs(next); if (enabled) updatePrefs(next) }
+  const setEvent = (k) => apply({ ...prefs, events: { ...prefs.events, [k]: !prefs.events[k] } })
+  const toggleTeam = (id) => apply({ ...prefs, teams: prefs.teams.includes(id) ? prefs.teams.filter((t) => t !== id) : [...prefs.teams, id] })
+
+  const enable = async () => { setBusy(true); setMsg(null); try { await enableNotifications(prefs); setEnabled(true); setMsg({ ok: true, text: 'Alerts are on!' }) } catch (e) { setMsg({ ok: false, text: e.message }) } finally { setBusy(false) } }
+  const disable = async () => { setBusy(true); try { await disableNotifications(); setEnabled(false); setMsg(null) } finally { setBusy(false) } }
+  const test = async () => { setBusy(true); setMsg(null); try { await sendTest(); setMsg({ ok: true, text: 'Test sent — check your notifications.' }) } catch (e) { setMsg({ ok: false, text: e.message }) } finally { setBusy(false) } }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm sm:items-center sm:p-4" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="max-h-[90vh] w-full max-w-md overflow-auto rounded-t-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl sm:rounded-2xl">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="flex items-center gap-2 text-lg font-bold text-white"><Bell className="h-5 w-5 text-violet-300" /> Match alerts</h2>
+          <button onClick={onClose} className="rounded-lg p-1 text-slate-400 hover:bg-slate-800"><X className="h-5 w-5" /></button>
+        </div>
+
+        {!supported ? (
+          <div className="rounded-xl border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-200">
+            {install
+              ? 'On iPhone, add this app to your Home Screen first (Share → Add to Home Screen), then open it from there to turn on alerts.'
+              : 'This browser doesn’t support push notifications.'}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <p className="text-sm text-slate-400">Get notified about live matches — pick exactly what you want.</p>
+            <div>
+              <div className="mb-1.5 text-xs font-bold uppercase tracking-wide text-slate-500">Notify me about</div>
+              <div className="space-y-1.5">
+                <NotifToggle on={prefs.events.goal} onClick={() => setEvent('goal')} label="⚽ Goals" desc="Score changes in live matches" />
+                <NotifToggle on={prefs.events.kickoff} onClick={() => setEvent('kickoff')} label="🔴 Kick-off" desc="When a match starts" />
+                <NotifToggle on={prefs.events.final} onClick={() => setEvent('final')} label="🏁 Full time" desc="Final scores" />
+                <NotifToggle on={prefs.events.soon} onClick={() => setEvent('soon')} label="⏰ Starting soon" desc="~15 min before kick-off" />
+              </div>
+            </div>
+            <div>
+              <div className="mb-1.5 text-xs font-bold uppercase tracking-wide text-slate-500">For which matches</div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button onClick={() => apply({ ...prefs, scope: 'all' })} className={scopeBtn(prefs.scope === 'all')}>All matches</button>
+                <button onClick={() => apply({ ...prefs, scope: 'teams' })} className={scopeBtn(prefs.scope === 'teams')}>Only my teams</button>
+              </div>
+              {prefs.scope === 'teams' && (
+                <div className="mt-2 max-h-44 overflow-auto rounded-xl border border-slate-700/50 bg-slate-800/30 p-2">
+                  {teams.length === 0 ? <p className="p-2 text-xs text-slate-400">Teams appear once live data loads.</p> : (
+                    <div className="flex flex-wrap gap-1.5">
+                      {teams.map((t) => (
+                        <button key={t.id} onClick={() => toggleTeam(t.id)} className={`inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium ring-1 ${prefs.teams.includes(t.id) ? 'bg-violet-500/25 text-violet-100 ring-violet-400/50' : 'bg-slate-800/50 text-slate-300 ring-slate-700/60'}`}>
+                          {t.logo ? <img src={t.logo} alt="" className="h-3 w-[18px] object-contain" /> : null} {t.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {msg && <div className={`rounded-lg px-3 py-2 text-sm ${msg.ok ? 'bg-emerald-500/10 text-emerald-200 ring-1 ring-emerald-500/30' : 'bg-rose-500/10 text-rose-200 ring-1 ring-rose-500/30'}`}>{msg.text}</div>}
+
+            {!enabled ? (
+              <button disabled={busy} onClick={enable} className="w-full rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-500 px-4 py-3 text-sm font-bold text-white disabled:opacity-60">
+                {busy ? 'Enabling…' : 'Enable alerts'}
+              </button>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-500/10 px-3 py-2 text-sm font-semibold text-emerald-300 ring-1 ring-emerald-500/30"><Check className="h-4 w-4" /> Alerts are on</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button disabled={busy} onClick={test} className="rounded-xl border border-slate-600/60 px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800 disabled:opacity-60">Send test</button>
+                  <button disabled={busy} onClick={disable} className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm font-semibold text-rose-300 hover:bg-rose-500/20 disabled:opacity-60">Turn off</button>
+                </div>
+              </div>
+            )}
+            <p className="text-[11px] text-slate-500">On iPhone, alerts require adding the app to your Home Screen. Alerts fire only while you’re subscribed on this device.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function LiveClock({ now }) {
   const time = new Date(now).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'America/Los_Angeles' })
   const date = new Date(now).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' })
@@ -759,6 +861,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [preds, setPreds] = useState(() => { try { return JSON.parse(localStorage.getItem(PRED_KEY)) || {} } catch { return {} } })
+  const [showNotif, setShowNotif] = useState(false)
   const mounted = useRef(true)
 
   const refresh = useMemo(() => async () => {
@@ -789,6 +892,12 @@ export default function App() {
 
   const views = useMemo(() => (feed ? buildViews(feed.matches) : null), [feed])
   const nodes = useMemo(() => (feed && views ? buildBracket(feed.matches, views.groups) : null), [feed, views])
+  const teamsList = useMemo(() => {
+    if (!views) return []
+    const seen = new Map()
+    views.groups.forEach((g) => g.teams.forEach((t) => { if (t.id && !seen.has(t.id)) seen.set(t.id, t) }))
+    return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name))
+  }, [views])
 
   const onPick = (nodeKey, teamId) => setPreds((p) => {
     const next = { ...p }
@@ -810,11 +919,17 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button onClick={() => setShowNotif(true)} title="Match alerts"
+              className="inline-flex items-center gap-1.5 rounded-full border border-slate-700/60 bg-slate-900/60 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:text-violet-200">
+              <Bell className="h-4 w-4" /> Alerts
+            </button>
             <UpdatedBadge updatedAt={feed?.updatedAt} stale={feed?.stale} loading={loading} onRefresh={refresh} />
             <LiveClock now={now} />
           </div>
         </div>
       </header>
+
+      {showNotif && <NotificationsModal teams={teamsList} onClose={() => setShowNotif(false)} />}
 
       <div className="mb-6 grid grid-cols-3 gap-1.5 rounded-2xl border border-slate-700/50 bg-slate-900/50 p-1.5 backdrop-blur sm:inline-grid sm:grid-flow-col">
         <TabButton active={tab === 'groups'} onClick={() => setTab('groups')} icon={<Trophy className="h-4 w-4" />}>Groups</TabButton>
